@@ -9,6 +9,7 @@ const fs = std.fs;
 const log = std.log;
 const io = std.io;
 const testing = std.testing;
+const json = std.json;
 
 /// the caller owns result memory
 fn findSocketPath(allocator: mem.Allocator) ![]const u8 {
@@ -143,4 +144,14 @@ pub fn main() !void {
     _ = try reader.readAll(payload);
     print("header={any}\n", .{header});
     print("payload={s}\n", .{payload});
+
+    {
+        var parser = json.Parser.init(allocator, false);
+        defer parser.deinit();
+
+        var tree = try parser.parse(payload);
+        defer tree.deinit();
+
+        assert(tree.root.Array.items[0].Object.get("success").?.Bool);
+    }
 }
