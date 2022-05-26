@@ -42,6 +42,10 @@ fn findSocketPath(allocator: mem.Allocator) ![]const u8 {
 
 const Protocol = struct {
     const magic = "i3-ipc";
+    const header_size = 14;
+    const magic_size = magic.len;
+    const type_size = 4;
+
     const MessageType = enum(u32) {
         run_command,
         get_workspaces,
@@ -78,6 +82,28 @@ const Protocol = struct {
         try writer.writeIntNative(u32, @enumToInt(mt));
         try writer.writeAll(payload);
     }
+
+    const ReplyHeader = struct {
+        magic: [magic_size]u8,
+        len: u32,
+        type: ReplyType,
+    };
+
+    fn unpackReplyHeader(reader: anytype) !ReplyHeader {
+        var raw: [header_size]u8 = undefined;
+
+        const rn = try reader.readAll(&raw);
+        if (rn < raw.len) return error.headerSizeTooSmall;
+
+        const header = ReplyHeader{
+            .magic = raw[0..6].*,
+            .len = mem.readIntNative(u32, raw[6..10]),
+            .type = @intToEnum(ReplyType, mem.readIntNative(u32, raw[10..14])),
+        };
+        assert(mem.eql(u8, &header.magic, Protocol.magic));
+
+        return header;
+    }
 };
 
 test "protocol.pack" {
@@ -112,6 +138,9 @@ pub fn main() !void {
     try Protocol.pack(writer, .run_command, "nop");
     try write_buffer.flush();
 
-    const rn = try reader.read(&read_buffer);
-    print("read: {s}\n", .{read_buffer[0..rn]});
+    const header = try Protocol.unpackReplyHeader(reader);
+    const payload = read_buffer[0..header.len];
+    _ = try reader.readAll(payload);
+    print("header={any}\n", .{header});
+    print("payload={s}\n", .{payload});
 }
