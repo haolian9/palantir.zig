@@ -123,33 +123,41 @@ pub fn main() !void {
 
     const allocator = gpa.allocator();
 
-    const path = try findSocketPath(allocator);
-    defer allocator.free(path);
+    var stream = blk: {
+        const path = try findSocketPath(allocator);
+        defer allocator.free(path);
 
-    print("path='{s}'\n", .{path});
-
-    var stream = try net.connectUnixSocket(path);
+        print("path='{s}'\n", .{path});
+        break :blk try net.connectUnixSocket(path);
+    };
     defer stream.close();
 
-    var write_buffer = io.bufferedWriter(stream.writer());
-    var read_buffer: [1024]u8 = undefined;
-    const writer = write_buffer.writer();
-    const reader = stream.reader();
+    {
+        var write_buffer = io.bufferedWriter(stream.writer());
+        const writer = write_buffer.writer();
+        try Protocol.pack(writer, .run_command, "nop");
+        try write_buffer.flush();
+    }
 
-    try Protocol.pack(writer, .run_command, "nop");
-    try write_buffer.flush();
+    const reply_payload = blk: {
+        var read_buffer: [1024]u8 = undefined;
+        const reader = stream.reader();
 
-    const header = try Protocol.unpackReplyHeader(reader);
-    const payload = read_buffer[0..header.len];
-    _ = try reader.readAll(payload);
-    print("header={any}\n", .{header});
-    print("payload={s}\n", .{payload});
+        const header = try Protocol.unpackReplyHeader(reader);
+        assert(header.len <= read_buffer.len);
+        const payload = read_buffer[0..header.len];
+        _ = try reader.readAll(payload);
+        print("header={any}\n", .{header});
+        print("payload={s}\n", .{payload});
+
+        break :blk payload;
+    };
 
     {
         var parser = json.Parser.init(allocator, false);
         defer parser.deinit();
 
-        var tree = try parser.parse(payload);
+        var tree = try parser.parse(reply_payload);
         defer tree.deinit();
 
         assert(tree.root.Array.items[0].Object.get("success").?.Bool);
