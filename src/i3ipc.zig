@@ -10,30 +10,47 @@ const log = std.log;
 const io = std.io;
 const testing = std.testing;
 const json = std.json;
+const linux = std.os.linux;
 
 /// the caller owns result memory
-fn findSocketPath(allocator: mem.Allocator) ![]const u8 {
+pub fn findSocketPath(allocator: mem.Allocator) ![]const u8 {
     // try env.I3SOCK first
     // then i3 --get-socketpath
 
-    // TODO@haoliang avoid this allocation
-    if (os.getenv("I3SOCK")) |path| return try allocator.dupe(u8, path);
+    if (os.getenv("I3SOCK")) |path| {
+        // after `i3 restart`, this env var can be wrong.
+        var stat: linux.Stat = undefined;
+        switch (linux.getErrno(linux.stat(&try os.toPosixPath(path), &stat))) {
+            .SUCCESS => {
+                if (linux.S.ISSOCK(stat.mode)) {
+                    return try allocator.dupe(u8, path);
+                } else {
+                    log.debug("I3SOCK not exists", .{});
+                }
+            },
+            else => |errno| {
+                log.debug("I3SOCK stat error: {}", .{errno});
+            },
+        }
+    } else {
+        log.debug("I3SOCK is missing", .{});
+    }
 
     const result = try std.ChildProcess.exec(.{ .allocator = allocator, .argv = &.{ "/usr/bin/i3", "--get-socketpath" } });
-    defer allocator.free(result.stderr);
+    defer {
+        allocator.free(result.stderr);
+        allocator.free(result.stdout);
+    }
 
     switch (result.term) {
         .Exited => {
             if (mem.endsWith(u8, result.stdout, "\n")) {
-                defer allocator.free(result.stdout);
-                // TODO@haoliang avoid this allocation
-                return try allocator.dupe(u8, result.stdout[0 .. result.stdout.len - 2]);
+                return try allocator.dupe(u8, result.stdout[0 .. result.stdout.len - 1]);
             } else {
                 return result.stdout;
             }
         },
         else => {
-            defer allocator.free(result.stdout);
             log.err("abnormal termination for i3 --get-socketpath: {s}", .{result.stderr});
         },
     }
@@ -41,13 +58,13 @@ fn findSocketPath(allocator: mem.Allocator) ![]const u8 {
     return error.NotFound;
 }
 
-const Protocol = struct {
+pub const Protocol = struct {
     const magic = "i3-ipc";
     const header_size = 14;
     const magic_size = magic.len;
     const type_size = 4;
 
-    const MessageType = enum(u32) {
+    pub const MessageType = enum(u32) {
         run_command,
         get_workspaces,
         subscribe,
@@ -62,7 +79,7 @@ const Protocol = struct {
         sync,
         get_binding_state,
     };
-    const ReplyType = enum(u32) {
+    pub const ReplyType = enum(u32) {
         command,
         workspaces,
         subscribe,
@@ -77,20 +94,20 @@ const Protocol = struct {
         sync,
         binding_state,
     };
-    fn pack(writer: anytype, mt: MessageType, payload: []const u8) !void {
+    pub fn pack(writer: anytype, mt: MessageType, payload: []const u8) !void {
         try writer.writeAll(magic);
         try writer.writeIntNative(u32, @intCast(u32, payload.len));
         try writer.writeIntNative(u32, @enumToInt(mt));
         try writer.writeAll(payload);
     }
 
-    const ReplyHeader = struct {
+    pub const ReplyHeader = struct {
         magic: [magic_size]u8,
         len: u32,
         type: ReplyType,
     };
 
-    fn unpackReplyHeader(reader: anytype) !ReplyHeader {
+    pub fn unpackReplyHeader(reader: anytype) !ReplyHeader {
         var raw: [header_size]u8 = undefined;
 
         const rn = try reader.readAll(&raw);
@@ -112,54 +129,18 @@ test "protocol.pack" {
     var buffer: [32]u8 = undefined;
     var stream = io.fixedBufferStream(&buffer);
     try Protocol.pack(stream.writer(), .run_command, "exit");
+
     const wrote = stream.getWritten();
     const expected = [_]u8{ 0x69, 0x33, 0x2d, 0x69, 0x70, 0x63, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x65, 0x78, 0x69, 0x74 };
     try testing.expectEqualStrings(&expected, wrote);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer assert(!gpa.deinit());
+test "protocol.unpackReplyHeader" {
+    const raw = [_]u8{ 0x69, 0x33, 0x2d, 0x69, 0x70, 0x63, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x65, 0x78, 0x69, 0x74 };
+    const expected = Protocol.ReplyHeader{ .magic = Protocol.magic.*, .len = 4, .type = .command };
+    var stream = io.fixedBufferStream(&raw);
+    const header = try Protocol.unpackReplyHeader(stream.reader());
 
-    const allocator = gpa.allocator();
-
-    var stream = blk: {
-        const path = try findSocketPath(allocator);
-        defer allocator.free(path);
-
-        print("path='{s}'\n", .{path});
-        break :blk try net.connectUnixSocket(path);
-    };
-    defer stream.close();
-
-    {
-        var write_buffer = io.bufferedWriter(stream.writer());
-        const writer = write_buffer.writer();
-        try Protocol.pack(writer, .run_command, "nop");
-        try write_buffer.flush();
-    }
-
-    const reply_payload = blk: {
-        var read_buffer: [1024]u8 = undefined;
-        const reader = stream.reader();
-
-        const header = try Protocol.unpackReplyHeader(reader);
-        assert(header.len <= read_buffer.len);
-        const payload = read_buffer[0..header.len];
-        _ = try reader.readAll(payload);
-        print("header={any}\n", .{header});
-        print("payload={s}\n", .{payload});
-
-        break :blk payload;
-    };
-
-    {
-        var parser = json.Parser.init(allocator, false);
-        defer parser.deinit();
-
-        var tree = try parser.parse(reply_payload);
-        defer tree.deinit();
-
-        assert(tree.root.Array.items[0].Object.get("success").?.Bool);
-    }
+    errdefer log.err("unpacked: {any}, expected: {any}", .{ header, expected });
+    try testing.expect(std.meta.eql(header, expected));
 }
