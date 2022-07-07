@@ -24,21 +24,54 @@ pub const MessageType = enum(u32) {
     sync,
     get_binding_state,
 };
-pub const ReplyType = enum(u32) {
-    command,
-    workspaces,
-    subscribe,
-    outputs,
-    tree,
-    marks,
-    bar_config,
-    version,
-    binding_modes,
-    config,
-    tick,
-    sync,
-    binding_state,
+
+pub const ResponseHeader = struct {
+    magic: [magic_size]u8,
+    len: u32,
+    type: Type,
+
+    pub const Type = union(enum) {
+        reply: Reply,
+        event: Event,
+
+        pub const Reply = enum(u32) {
+            command,
+            workspaces,
+            subscribe,
+            outputs,
+            tree,
+            marks,
+            bar_config,
+            version,
+            binding_modes,
+            config,
+            tick,
+            sync,
+            binding_state,
+        };
+
+        pub const Event = enum(u32) {
+            workspace,
+            output,
+            mode,
+            window,
+            barconfig_update,
+            binding,
+            shutdown,
+            tick,
+        };
+
+        fn init(int: u32) Type {
+            return if (int >> 31 == 1) .{ .event = @intToEnum(Event, int & 0x7f) } else .{ .reply = @intToEnum(Reply, int) };
+        }
+    };
 };
+
+pub const Response = union {
+    reply: []const u8,
+    event: []const u8,
+};
+
 pub fn pack(writer: anytype, mt: MessageType, payload: []const u8) !void {
     try writer.writeAll(magic);
     try writer.writeIntNative(u32, @intCast(u32, payload.len));
@@ -46,23 +79,13 @@ pub fn pack(writer: anytype, mt: MessageType, payload: []const u8) !void {
     try writer.writeAll(payload);
 }
 
-pub const ReplyHeader = struct {
-    magic: [magic_size]u8,
-    len: u32,
-    type: ReplyType,
-};
-
-pub fn unpackReplyHeader(reader: anytype) !ReplyHeader {
+pub fn unpackResponseHeader(reader: anytype) !ResponseHeader {
     var raw: [header_size]u8 = undefined;
 
     const rn = try reader.readAll(&raw);
     if (rn < raw.len) return error.headerSizeTooSmall;
 
-    const header = ReplyHeader{
-        .magic = raw[0..6].*,
-        .len = mem.readIntNative(u32, raw[6..10]),
-        .type = @intToEnum(ReplyType, mem.readIntNative(u32, raw[10..14])),
-    };
+    const header = ResponseHeader{ .magic = raw[0..6].*, .len = mem.readIntNative(u32, raw[6..10]), .type = ResponseHeader.Type.init(mem.readIntNative(u32, raw[10..14])) };
     assert(mem.eql(u8, &header.magic, magic));
 
     return header;
@@ -80,11 +103,11 @@ test "protocol.pack" {
     try testing.expectEqualStrings(&expected, wrote);
 }
 
-test "protocol.unpackReplyHeader" {
+test "protocol.unpackResponseHeader" {
     const raw = "i3-ipc\x12\x00\x00\x00\x00\x00\x00\x00[{\"success\":true}]";
-    const expected = ReplyHeader{ .magic = magic.*, .len = 18, .type = .command };
+    const expected = ResponseHeader{ .magic = magic.*, .len = 18, .type = .{ .reply = .command } };
     var stream = io.fixedBufferStream(raw);
-    const header = try unpackReplyHeader(stream.reader());
+    const header = try unpackResponseHeader(stream.reader());
 
     try expectEqual(expected, header);
 }
