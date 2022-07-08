@@ -28,7 +28,7 @@ pub const Resp = struct {
         _ = fmt;
         _ = options;
         _ = writer;
-        return std.fmt.format(writer, "({any}, {s})", .{self.header, self.payload});
+        return std.fmt.format(writer, "({any}, {s})", .{ self.header, self.payload });
     }
 };
 
@@ -132,25 +132,13 @@ fn recvRespUnsafeAlloc(self: Self, allocator: mem.Allocator, max_size: usize) !R
 
     if (header.len > max_size) @panic("response is too big");
 
-    var payload = try allocator.alloc(u8, header.len);
-    errdefer allocator.free(payload);
+    var buffer = try allocator.alloc(u8, header.len);
+    errdefer allocator.free(buffer);
 
-    {
-        var remain: usize = header.len;
-        var start_at: usize = 0;
-        while (remain > 0) {
-            const n = try reader.readAll(payload[start_at .. start_at + remain]);
-            if (n == 0) break;
-            remain -= n;
-            start_at += n;
-        }
-        assert(start_at == header.len);
-    }
+    const bytes_read = try reader.readAll(buffer[0..header.len]);
+    if (bytes_read < header.len) return error.incompleteResponsePayload;
 
-    return Resp{
-        .header = header,
-        .payload = payload,
-    };
+    return Resp{ .header = header, .payload = buffer[0..header.len] };
 }
 
 fn recvRespUnsafe(self: Self, buffer: []u8) !Resp {
@@ -162,17 +150,8 @@ fn recvRespUnsafe(self: Self, buffer: []u8) !Resp {
 
     if (header.len > buffer.len) return error.bufferOverflowed;
 
-    {
-        var remain: usize = header.len;
-        var start_at: usize = 0;
-        while (remain > 0) {
-            const n = try reader.readAll(buffer[start_at .. start_at + remain]);
-            if (n == 0) break;
-            remain -= n;
-            start_at += n;
-        }
-        assert(start_at == header.len);
-    }
+    const bytes_read = try reader.readAll(buffer[0..header.len]);
+    if (bytes_read < header.len) return error.incompleteResponsePayload;
 
     return Resp{ .header = header, .payload = buffer[0..header.len] };
 }

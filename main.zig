@@ -37,7 +37,8 @@ pub fn main() !void {
 
         print("{} {}\n", .{i3ipc.Protocol.ResponseType.Reply.command, header.type.reply});
         const payload = read_buffer[0..header.len];
-        _ = try reader.readAll(payload);
+        const rn = try reader.readAll(payload);
+        assert(rn == payload.len);
         print("header={any}\n", .{header});
         print("payload={s}\n", .{payload});
 
