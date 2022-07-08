@@ -1,27 +1,23 @@
 const std = @import("std");
-const assert = std.debug.assert;
-const net = std.net;
-const io = std.io;
 const log = std.log;
-const fmt = std.fmt;
 
 const i3ipc = @import("src/i3ipc.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer assert(!gpa.deinit());
+    defer std.debug.assert(!gpa.deinit());
 
     const allocator = gpa.allocator();
 
-    const path = try i3ipc.findSocketPath(allocator);
+    const path = try i3ipc.findSocketPathAlloc(allocator);
     defer allocator.free(path);
     log.debug("path='{s}'", .{path});
 
-    var stream = try net.connectUnixSocket(path);
+    var stream = try std.net.connectUnixSocket(path);
     defer stream.close();
 
     {
-        var write_buffer = io.bufferedWriter(stream.writer());
+        var write_buffer = std.io.bufferedWriter(stream.writer());
         const writer = write_buffer.writer();
         try i3ipc.Protocol.pack(writer, .run_command, "nop");
         try write_buffer.flush();
@@ -32,5 +28,5 @@ pub fn main() !void {
     const n = try reader.read(&buf);
     const resp = buf[0..n];
 
-    log.info("'{s}'\n", .{fmt.fmtSliceEscapeLower(resp)});
+    log.info("'{s}'", .{std.fmt.fmtSliceEscapeLower(resp)});
 }

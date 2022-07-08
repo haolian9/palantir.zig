@@ -12,33 +12,30 @@ pub fn main() !void {
 
     var conn: i3ipc.Connection = undefined;
     {
-        const path = try i3ipc.findSocketPath(allocator);
-        defer allocator.free(path);
-        conn = try i3ipc.Connection.init(allocator, path);
+        var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const path = try i3ipc.findSocketPath(&buffer);
+        conn = try i3ipc.Connection.init(path);
     }
     defer conn.deinit();
 
     try conn.sendMsg(.subscribe, "[\"workspace\"]");
 
-    if (true) {
-        var buffer: [1 << 20]u8 = undefined;
-        var resp_iter = conn.iterateResp(&buffer);
-        defer resp_iter.deinit();
+    var resp_iter = conn.iterateResp();
+    defer resp_iter.deinit();
 
+    if (false) {
+        var buffer: [1 << 20]u8 = undefined;
         var countdown: usize = 3;
-        while (resp_iter.next()) |resp| {
+        while (resp_iter.next(&buffer)) |resp| {
             if (countdown < 1) break else countdown -= 1;
-            log.info("{s}", .{resp});
+            log.info("{}", .{resp});
         } else |err| return err;
     } else {
-        var resp_iter = conn.iterateRespAlloc();
-        defer resp_iter.deinit();
-
         var countdown: usize = 3;
-        while (resp_iter.next()) |resp| {
-            defer allocator.free(resp);
+        while (resp_iter.nextAlloc(allocator, 1 << 20)) |resp| {
+            defer allocator.free(resp.payload);
             if (countdown < 1) break else countdown -= 1;
-            log.info("{s}", .{resp});
+            log.info("{}", .{resp});
         } else |err| return err;
     }
 }

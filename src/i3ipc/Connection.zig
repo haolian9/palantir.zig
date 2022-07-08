@@ -4,10 +4,12 @@ const io = std.io;
 const net = std.net;
 const log = std.log;
 const assert = std.debug.assert;
+const testing = std.testing;
 
 const Protocol = @import("Protocol.zig");
 
-allocator: mem.Allocator,
+// todo: handles eof when read
+
 stream: net.Stream,
 rlock: std.Thread.Mutex,
 wlock: std.Thread.Mutex,
@@ -17,47 +19,44 @@ const BufferedWriter = io.BufferedWriter(4 << 10, net.Stream.Writer);
 const Self = @This();
 const Connection = Self;
 
+pub const Resp = struct {
+    header: Protocol.ResponseHeader,
+    payload: []const u8,
+
+    pub fn format(self: Resp, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = self;
+        _ = fmt;
+        _ = options;
+        _ = writer;
+        return std.fmt.format(writer, "({any}, {s})", .{self.header, self.payload});
+    }
+};
+
 pub const RespIterator = struct {
     ctx: *Connection,
-    buffer: []u8,
 
-    pub fn init(ctx: *Connection, buffer: []u8) RespIterator {
+    pub fn init(ctx: *Connection) RespIterator {
         ctx.rlock.lock();
-        return .{ .ctx = ctx, .buffer = buffer };
+        return .{ .ctx = ctx };
     }
 
     pub fn deinit(self: *RespIterator) void {
         self.ctx.rlock.unlock();
     }
 
-    pub fn next(self: RespIterator) ![]const u8 {
-        return self.ctx.recvRespUnsafe(self.buffer);
+    pub fn next(self: RespIterator, buffer: []u8) !Resp {
+        return self.ctx.recvRespUnsafe(buffer);
+    }
+
+    pub fn nextAlloc(self: RespIterator, allocator: mem.Allocator, max_size: usize) !Resp {
+        return self.ctx.recvRespUnsafeAlloc(allocator, max_size);
     }
 };
 
-pub const RespIteratorAlloc = struct {
-    ctx: *Connection,
-
-    pub fn init(ctx: *Connection) RespIteratorAlloc {
-        ctx.rlock.lock();
-        return .{ .ctx = ctx };
-    }
-
-    pub fn deinit(self: *RespIteratorAlloc) void {
-        self.ctx.rlock.unlock();
-    }
-
-    // need to free returned memory
-    pub fn next(self: RespIteratorAlloc) ![]const u8 {
-        return self.ctx.recvRespUnsafeAlloc();
-    }
-};
-
-pub fn init(allocator: mem.Allocator, path: []const u8) !Self {
+pub fn init(path: []const u8) !Self {
     var stream = try net.connectUnixSocket(path);
 
     return Self{
-        .allocator = allocator,
         .stream = stream,
         .rlock = std.Thread.Mutex{},
         .wlock = std.Thread.Mutex{},
@@ -68,66 +67,79 @@ pub fn deinit(self: Self) void {
     self.stream.close();
 }
 
-// caller owns returned memory
-pub fn roundtrip(self: *Self, mt: Protocol.MessageType, payload: []const u8) ![]const u8 {
-    try self.sendMsg(mt, payload);
-    return self.recvResp();
+pub fn roundtrip(
+    self: *Self,
+    args: struct {
+        buffer: []u8,
+        msg_type: Protocol.MessageType = .run_command,
+        payload: []const u8,
+    },
+) !Resp {
+    try self.sendMsg(args.msg_type, args.payload);
+    return self.recvResp(args.buffer);
 }
 
-pub fn sendMsg(self: *Self, mt: Protocol.MessageType, payload: []const u8) !void {
+// caller owns resp.payload
+pub fn roundtripAlloc(
+    self: *Self,
+    args: struct {
+        allocator: mem.Allocator,
+        msg_type: Protocol.MessageType = .run_command,
+        payload: []const u8,
+        max_resp_payload_size: usize = 1 << 20,
+    },
+) !Resp {
+    try self.sendMsg(args.msg_type, args.payload);
+    return self.recvRespAlloc(args.allocator, args.max_resp_payload_size);
+}
+
+pub fn sendMsg(self: *Self, msg_type: Protocol.MessageType, payload: []const u8) !void {
     self.wlock.lock();
     defer self.wlock.unlock();
 
     var wb = BufferedWriter{ .unbuffered_writer = self.stream.writer() };
 
-    try Protocol.pack(wb.writer(), mt, payload);
+    try Protocol.pack(wb.writer(), msg_type, payload);
     try wb.flush();
-    log.debug("sent request: {s} {s}", .{ mt, payload });
+    log.debug("sent request: {s} {s}", .{ msg_type, payload });
 }
 
 // caller owns returned memory
-pub fn recvRespAlloc(self: *Self) ![]const u8 {
+pub fn recvRespAlloc(self: *Self, allocator: mem.Allocator, max_size: usize) !Resp {
     self.rlock.lock();
     defer self.rlock.unlock();
 
-    return self.recvRespUnsafeAlloc();
+    return self.recvRespUnsafeAlloc(allocator, max_size);
 }
 
-pub fn recvResp(self: *Self, buffer: []u8) ![]const u8 {
+pub fn recvResp(self: *Self, buffer: []u8) !Resp {
     self.rlock.lock();
     defer self.rlock.unlock();
 
     return self.recvRespUnsafe(buffer);
 }
 
-pub fn iterateResp(self: *Self, buffer: []u8) RespIterator {
-    return RespIterator.init(self, buffer);
+pub fn iterateResp(self: *Self) RespIterator {
+    return RespIterator.init(self);
 }
 
-pub fn iterateRespAlloc(self: *Self) RespIteratorAlloc {
-    return RespIteratorAlloc.init(self);
-}
-
-fn recvRespUnsafeAlloc(self: Self) ![]const u8 {
+fn recvRespUnsafeAlloc(self: Self, allocator: mem.Allocator, max_size: usize) !Resp {
     log.debug("reading response", .{});
 
-    // todo: is a buffered reader needed here?
     const reader = self.stream.reader();
-    // todo: handles eof
     const header = try Protocol.unpackResponseHeader(reader);
     log.debug("read response header: {}", .{header});
 
-    if (header.len > 5 << 20) @panic("response is too big");
+    if (header.len > max_size) @panic("response is too big");
 
-    // todo: stream/iterator instead of slice in memory?
-    var resp = try self.allocator.alloc(u8, header.len);
-    errdefer self.allocator.free(resp);
+    var payload = try allocator.alloc(u8, header.len);
+    errdefer allocator.free(payload);
 
     {
         var remain: usize = header.len;
         var start_at: usize = 0;
         while (remain > 0) {
-            const n = try reader.readAll(resp[start_at .. start_at + remain]);
+            const n = try reader.readAll(payload[start_at .. start_at + remain]);
             if (n == 0) break;
             remain -= n;
             start_at += n;
@@ -135,15 +147,16 @@ fn recvRespUnsafeAlloc(self: Self) ![]const u8 {
         assert(start_at == header.len);
     }
 
-    return resp;
+    return Resp{
+        .header = header,
+        .payload = payload,
+    };
 }
 
-fn recvRespUnsafe(self: Self, buffer: []u8) ![]const u8 {
+fn recvRespUnsafe(self: Self, buffer: []u8) !Resp {
     log.debug("reading response", .{});
 
-    // todo: is a buffered reader needed here?
     const reader = self.stream.reader();
-    // todo: handles eof
     const header = try Protocol.unpackResponseHeader(reader);
     log.debug("read response header: {}", .{header});
 
@@ -161,5 +174,5 @@ fn recvRespUnsafe(self: Self, buffer: []u8) ![]const u8 {
         assert(start_at == header.len);
     }
 
-    return buffer[0..header.len];
+    return Resp{ .header = header, .payload = buffer[0..header.len] };
 }

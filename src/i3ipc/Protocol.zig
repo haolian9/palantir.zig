@@ -25,51 +25,46 @@ pub const MessageType = enum(u32) {
     get_binding_state,
 };
 
+pub const ResponseType = union(enum) {
+    reply: Reply,
+    event: Event,
+
+    pub const Reply = enum(u32) {
+        command,
+        workspaces,
+        subscribe,
+        outputs,
+        tree,
+        marks,
+        bar_config,
+        version,
+        binding_modes,
+        config,
+        tick,
+        sync,
+        binding_state,
+    };
+
+    pub const Event = enum(u32) {
+        workspace,
+        output,
+        mode,
+        window,
+        barconfig_update,
+        binding,
+        shutdown,
+        tick,
+    };
+
+    fn init(int: u32) ResponseType {
+        return if (int >> 31 == 1) .{ .event = @intToEnum(Event, int & 0x7f) } else .{ .reply = @intToEnum(Reply, int) };
+    }
+};
+
 pub const ResponseHeader = struct {
     magic: [magic_size]u8,
     len: u32,
-    type: Type,
-
-    pub const Type = union(enum) {
-        reply: Reply,
-        event: Event,
-
-        pub const Reply = enum(u32) {
-            command,
-            workspaces,
-            subscribe,
-            outputs,
-            tree,
-            marks,
-            bar_config,
-            version,
-            binding_modes,
-            config,
-            tick,
-            sync,
-            binding_state,
-        };
-
-        pub const Event = enum(u32) {
-            workspace,
-            output,
-            mode,
-            window,
-            barconfig_update,
-            binding,
-            shutdown,
-            tick,
-        };
-
-        fn init(int: u32) Type {
-            return if (int >> 31 == 1) .{ .event = @intToEnum(Event, int & 0x7f) } else .{ .reply = @intToEnum(Reply, int) };
-        }
-    };
-};
-
-pub const Response = union {
-    reply: []const u8,
-    event: []const u8,
+    type: ResponseType,
 };
 
 pub fn pack(writer: anytype, mt: MessageType, payload: []const u8) !void {
@@ -85,7 +80,11 @@ pub fn unpackResponseHeader(reader: anytype) !ResponseHeader {
     const rn = try reader.readAll(&raw);
     if (rn < raw.len) return error.headerSizeTooSmall;
 
-    const header = ResponseHeader{ .magic = raw[0..6].*, .len = mem.readIntNative(u32, raw[6..10]), .type = ResponseHeader.Type.init(mem.readIntNative(u32, raw[10..14])) };
+    const header = ResponseHeader{
+        .magic = raw[0..6].*,
+        .len = mem.readIntNative(u32, raw[6..10]),
+        .type = ResponseType.init(mem.readIntNative(u32, raw[10..14])),
+    };
     assert(mem.eql(u8, &header.magic, magic));
 
     return header;

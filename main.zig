@@ -14,9 +14,8 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var stream = blk: {
-        const path = try i3ipc.findSocketPath(allocator);
-        defer allocator.free(path);
-
+        var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const path = try i3ipc.findSocketPath(&buffer);
         print("path='{s}'\n", .{path});
         break :blk try net.connectUnixSocket(path);
     };
@@ -33,8 +32,10 @@ pub fn main() !void {
         var read_buffer: [1024]u8 = undefined;
         const reader = stream.reader();
 
-        const header = try i3ipc.Protocol.unpackReplyHeader(reader);
+        const header = try i3ipc.Protocol.unpackResponseHeader(reader);
         assert(header.len <= read_buffer.len);
+
+        print("{} {}\n", .{i3ipc.Protocol.ResponseType.Reply.command, header.type.reply});
         const payload = read_buffer[0..header.len];
         _ = try reader.readAll(payload);
         print("header={any}\n", .{header});

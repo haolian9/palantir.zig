@@ -1,4 +1,4 @@
 
-test "the test suite" {
-    _ = @import("i3ipc.zig");
+test "collect" {
+    _ = @import("i3ipc/tests.zig");
 }
