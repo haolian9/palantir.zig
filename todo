@@ -1,5 +1,4 @@
 
-* [ ] event struct
-* [ ] parse json to struct: message, reply, event
-* [ ] subscribe to events
-* [ ] full-duplex async connection abstract
+* event struct
+* parse json to struct: message, reply, event
+* full-duplex async connection abstract
